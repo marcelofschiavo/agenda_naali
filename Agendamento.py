@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 import pandas as pd
 from datetime import date, datetime
@@ -10,6 +11,16 @@ from utils import (
     carregar_tudo_formatado # <--- NOVO: Para puxar o histórico do aluno
 )
 from admin_view import render_admin_page
+
+# Pega a variável que você configurou no painel do Render
+db_url = os.environ.get("DATABASE_URL")
+
+# Correção comum: SQLAlchemy exige 'postgresql://' em vez de 'postgres://'
+if db_url and db_url.startswith("postgres://"):
+    db_url = db_url.replace("postgres://", "postgresql://", 1)
+
+# Cria a conexão passando a URL explicitamente
+conn = st.connection("postgres", type="sql", url=db_url)
 
 st.set_page_config(page_title="Agenda Naalli", page_icon="🏋️‍♀️", layout="wide")
 
