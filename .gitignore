@@ -1,0 +1,15 @@
+# Ignorar ambiente virtual
+venv/
+.env
+
+# Ignorar banco de dados local (para não subir dados de teste)
+*.json
+
+# Ignorar cache do Python
+__pycache__/
+*.pyc
+
+# Ignorar segredos do Streamlit
+.streamlit/secrets.toml
+
+.DS_Store

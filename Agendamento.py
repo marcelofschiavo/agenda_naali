@@ -1,0 +1,341 @@
+import streamlit as st
+import pandas as pd
+from datetime import date, datetime
+import plotly.express as px # <--- NOVO: Necessário para os gráficos do aluno
+from utils import (
+    carregar_dados_dia, salvar_agendamento, remover_agendamento_por_pin, 
+    gerar_estrutura_horario, verificar_login, atualizar_senha, 
+    recuperar_senha_email, criar_usuario, 
+    get_aulas_pendentes_avaliacao, salvar_avaliacao_aluno, 
+    carregar_tudo_formatado # <--- NOVO: Para puxar o histórico do aluno
+)
+from admin_view import render_admin_page
+
+st.set_page_config(page_title="Agenda Naalli", page_icon="🏋️‍♀️", layout="wide")
+
+# --- GERENCIAMENTO DE SESSÃO ---
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+    st.session_state.user = None
+    st.session_state.view = "login"
+
+# --- HELPER: FORMATAR NOME (Nome + 1 Sobrenome) ---
+def formatar_nome_curto(nome_completo):
+    if not nome_completo: return ""
+    partes = nome_completo.strip().split()
+    if len(partes) >= 2:
+        return f"{partes[0]} {partes[1]}"
+    return partes[0]
+
+# --- FUNÇÕES DE INTERFACE ---
+def login_screen():
+    c1, c2, c3 = st.columns([1, 2, 1])
+    with c2:
+        st.header("🔐 Agenda Naalli")
+        st.write("Faça login para agendar.")
+        
+        email = st.text_input("E-mail")
+        senha = st.text_input("Senha", type="password")
+        
+        col_entrar, col_esqueceu = st.columns([1,1])
+        
+        if col_entrar.button("Entrar", type="primary", use_container_width=True):
+            user = verificar_login(email, senha)
+            if user:
+                st.session_state.user = user
+                st.session_state.logged_in = True
+                if user.get('mudar_senha', False):
+                    st.session_state.view = "force_change"
+                else:
+                    st.session_state.view = "main"
+                st.rerun()
+            else:
+                st.error("E-mail ou senha inválidos.")
+        
+        if col_esqueceu.button("Esqueci a senha"):
+            st.session_state.view = "recovery"
+            st.rerun()
+            
+        st.markdown("---")
+        st.caption("Primeiro acesso? Use o login fornecido pela recepção.")
+
+def recovery_screen():
+    c1, c2, c3 = st.columns([1, 2, 1])
+    with c2:
+        st.header("🔑 Recuperar Senha")
+        st.write("Digite seu e-mail. Enviaremos uma senha temporária.")
+        email = st.text_input("Seu E-mail Cadastrado")
+        
+        if st.button("Enviar E-mail de Recuperação", type="primary"):
+            sucesso, msg = recuperar_senha_email(email)
+            if sucesso:
+                st.success(msg)
+                st.info("Verifique seu e-mail e use a senha temporária para logar.")
+            else:
+                st.error(msg)
+        
+        if st.button("Voltar ao Login"):
+            st.session_state.view = "login"
+            st.rerun()
+
+def force_change_screen():
+    c1, c2, c3 = st.columns([1, 2, 1])
+    with c2:
+        st.warning("⚠️ Segurança: Você precisa alterar sua senha no primeiro acesso.")
+        nova_senha = st.text_input("Nova Senha", type="password")
+        confirma_senha = st.text_input("Confirme a Nova Senha", type="password")
+        
+        if st.button("Atualizar Senha", type="primary"):
+            if nova_senha == confirma_senha and len(nova_senha) > 3:
+                atualizar_senha(st.session_state.user['email'], nova_senha)
+                st.success("Senha atualizada! Redirecionando...")
+                st.session_state.user['mudar_senha'] = False
+                st.session_state.view = "main"
+                st.rerun()
+            else:
+                st.error("As senhas não conferem ou são muito curtas.")
+
+def main_app():
+    # --- HEADER & LOGOUT (AJUSTADO - SOLICITAÇÃO 1) ---
+    # Ajustei as proporções para o botão ficar mais compacto à direita
+    col_t, col_l = st.columns([8, 1]) 
+    with col_t:
+        st.title(f"Olá, {formatar_nome_curto(st.session_state.user['nome'])}! 👋")
+    with col_l:
+        st.write("") # Espaçamento para alinhar verticalmente
+        if st.button("Sair", type="secondary", use_container_width=True):
+            st.session_state.logged_in = False
+            st.session_state.user = None
+            st.session_state.view = "login"
+            st.rerun()
+
+    # --- SELETORES ---
+    c1, c2 = st.columns(2)
+    with c1:
+        data_sel = st.date_input("Data:", date.today(), format="DD/MM/YYYY")
+        data_str = data_sel.strftime("%d/%m/%Y")
+    
+    # [LÓGICA DE SÁBADO E DOMINGO]
+    dia_semana = data_sel.weekday() # 5 = Sábado, 6 = Domingo
+    
+    if dia_semana == 6:
+        st.error("🚫 A academia não abre aos Domingos.")
+        return 
+        
+    elif dia_semana == 5:
+        horarios = [f"{h:02d}:00" for h in range(8, 13)] 
+        aviso_sabado = " (Sábado: 08h às 12h)"
+    else:
+        horarios = [f"{h:02d}:00" for h in range(6, 21)]
+        aviso_sabado = ""
+
+    with c2:
+        hora_sel = st.selectbox(f"Horário{aviso_sabado}:", horarios)
+
+    # --- BANNER ---
+    DIAS_PT = {0: "Segunda-feira", 1: "Terça-feira", 2: "Quarta-feira", 3: "Quinta-feira", 4: "Sexta-feira", 5: "Sábado", 6: "Domingo"}
+    nome_dia = DIAS_PT[dia_semana]
+    
+    st.markdown(f"""
+        <div style="background-color: #e8f4f8; padding: 15px; border-radius: 10px; text-align: center; margin: 20px 0; border: 1px solid #b8daff; color: #004085;">
+            <span style="font-size: 20px;">📅 <b>{nome_dia}, {data_str}</b></span>
+            &nbsp;|&nbsp;
+            <span style="font-size: 20px;">⏰ <b>{hora_sel}</b></span>
+        </div>
+    """, unsafe_allow_html=True)
+
+    # --- CARREGAMENTO ---
+    df_dia = carregar_dados_dia(data_str)
+    agendamentos_horario = df_dia[df_dia['Horario'] == hora_sel] if not df_dia.empty else pd.DataFrame()
+
+    st.divider()
+    todas_vagas = gerar_estrutura_horario(hora_sel)
+    
+    # Renderiza grupos
+    grupos = {
+        "🏋️‍♂️ Musculação": [v for v in todas_vagas if v['Tipo'] == 'Treino'],
+        "🏃 Esteiras": [v for v in todas_vagas if v['Tipo'] == 'Esteira'],
+        "🚴 Elípticos": [v for v in todas_vagas if v['Tipo'] == 'Elíptico']
+    }
+
+    for titulo, vagas in grupos.items():
+        if vagas:
+            st.markdown(f"### {titulo}")
+            cols = st.columns(4)
+            for idx, vaga in enumerate(vagas):
+                num, tipo = vaga['Numero'], vaga['Tipo']
+                ocupante_nome_full = None
+                
+                # Verifica ocupação
+                if not agendamentos_horario.empty:
+                    filtro = agendamentos_horario[(agendamentos_horario['Numero'] == num) & (agendamentos_horario['Tipo'] == tipo)]
+                    if not filtro.empty: 
+                        ocupante_nome_full = filtro.iloc[0]['Nome']
+                
+                with cols[idx % 4]:
+                    if ocupante_nome_full:
+                        # Exibe apenas Nome + 1 Sobrenome
+                        nome_exibicao = formatar_nome_curto(ocupante_nome_full)
+                        st.warning(f"🔒 {num} - {nome_exibicao}")
+                        
+                        # Liberação: Dono ou Admin
+                        if ocupante_nome_full == st.session_state.user['nome']:
+                            if st.button("Liberar", key=f"lib_{tipo}_{num}"):
+                                remover_agendamento_por_pin(data_str, hora_sel, num, tipo, "", is_admin=True)
+                                st.rerun()
+                    else:
+                        st.success(f"✅ {num} - Livre")
+                        if st.button("Reservar", key=f"res_{tipo}_{num}", type="primary", use_container_width=True):
+                            salvar_agendamento(data_str, hora_sel, num, tipo, st.session_state.user['nome'], "LOGGED_USER")
+                            st.success("Agendado!")
+                            st.rerun()
+            st.markdown("---")
+
+    # --- ÁREA DE AVALIAÇÃO E RAIO-X DO ALUNO ---
+    # (SOLICITAÇÃO 3: Admin NÃO vê avaliação, mas vê o painel dele lá embaixo)
+    if st.session_state.user['tipo'] != 'admin':
+        
+        # 1. BLOCO DE AVALIAÇÃO
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.subheader("⭐ Avalie seu Treino")
+        st.caption("Ajude a Naalli a melhorar. Avalie as aulas que você já concluiu.")
+        
+        aulas_pendentes = get_aulas_pendentes_avaliacao(st.session_state.user['nome'])
+        
+        if aulas_pendentes:
+            opcoes = {f"{a['Data']} - {a['Horario']} | {a['Tipo']}": a for a in aulas_pendentes}
+            escolha = st.selectbox("Selecione a aula para avaliar:", list(opcoes.keys()), key="sel_aval")
+            dados_aula = opcoes[escolha]
+            
+            with st.form("form_avaliacao"):
+                c_stars, c_text = st.columns([1, 2])
+                with c_stars:
+                    st.write("Sua nota:")
+                    stars = st.feedback("stars")
+                with c_text:
+                    comentario = st.text_area("Comentário (Opcional):", placeholder="O que achou do treino?")
+                
+                submit_aval = st.form_submit_button("Enviar Avaliação", type="primary")
+                
+                if submit_aval:
+                    if stars is not None:
+                        salvar_avaliacao_aluno(dados_aula['doc_id'], st.session_state.user['nome'], dados_aula['Data'], dados_aula['Tipo'], stars+1, comentario)
+                        st.success("Obrigado pelo feedback!")
+                        st.rerun()
+                    else:
+                        st.warning("Por favor, selecione as estrelas.")
+        else:
+            st.info("🎉 Você não tem avaliações pendentes no momento.")
+
+        st.divider()
+
+        # 2. RAIO-X DO ALUNO (SOLICITAÇÃO 2: INSERIDO AQUI)
+        st.subheader("📊 Seu Painel do Atleta")
+        
+        df_full = carregar_tudo_formatado()
+        nome_user = st.session_state.user['nome']
+        
+        if not df_full.empty:
+            # Filtra apenas o aluno logado
+            df_aluno = df_full[df_full['Nome'] == nome_user].sort_values('Data_dt', ascending=False)
+            
+            if not df_aluno.empty:
+                # --- CÁLCULOS DO RAIO-X ---
+                total_vida = len(df_aluno)
+                primeira_vez = df_aluno['Data_dt'].min().strftime('%d/%m/%Y')
+                ultima_vez_dt = df_aluno['Data_dt'].max()
+                ultima_vez = ultima_vez_dt.strftime('%d/%m/%Y')
+                
+                # Status de Frequência
+                dias_sem_vir = (datetime.now() - ultima_vez_dt).days
+                if dias_sem_vir <= 7:
+                    status_txt = "🟢 Ativo"
+                    status_msg = "Você está mandando bem!"
+                elif dias_sem_vir <= 30:
+                    status_txt = "🟡 Atenção"
+                    status_msg = f"Faz {dias_sem_vir} dias que não te vemos."
+                else:
+                    status_txt = "🔴 Inativo"
+                    status_msg = "Vamos voltar a treinar?"
+
+                # Layout do Cartão
+                with st.container(border=True):
+                    c_head1, c_head2 = st.columns([3, 1])
+                    c_head1.markdown(f"### Status: {status_txt}")
+                    c_head1.caption(status_msg)
+                    
+                    # Métricas
+                    m1, m2, m3, m4 = st.columns(4)
+                    m1.metric("Total Check-ins", total_vida)
+                    m2.metric("Último Treino", ultima_vez)
+                    m3.metric("Primeiro Treino", primeira_vez)
+                    
+                    # Média Semanal
+                    semanas_ativo = ((df_aluno['Data_dt'].max() - df_aluno['Data_dt'].min()).days / 7) or 1
+                    media_semanal = round(total_vida / semanas_ativo, 1)
+                    m4.metric("Média / Semana", media_semanal)
+                    
+                    st.divider()
+                    
+                    # Gráficos
+                    col_chart1, col_chart2 = st.columns(2)
+                    
+                    with col_chart1:
+                        st.markdown("**Sua Modalidade Favorita**")
+                        if not df_aluno.empty:
+                            fig_pizza = px.pie(df_aluno, names='Tipo', hole=0.5, height=250)
+                            fig_pizza.update_layout(margin=dict(t=0, b=0, l=0, r=0), showlegend=False)
+                            st.plotly_chart(fig_pizza, use_container_width=True)
+                            
+                    with col_chart2:
+                        st.markdown("**Seus Últimos Treinos**")
+                        st.dataframe(
+                            df_aluno[['Data', 'Horario', 'Tipo']].head(5), 
+                            hide_index=True, 
+                            use_container_width=True
+                        )
+            else:
+                st.info("Agende seu primeiro treino para ver suas estatísticas aqui!")
+        else:
+            st.info("Nenhum dado encontrado.")
+
+    # --- ACESSO ADMIN ---
+    if st.session_state.user['tipo'] == 'admin':
+        st.markdown("<br><br>", unsafe_allow_html=True)
+        with st.expander("🔐 Painel Administrativo"):
+            # SOLICITAÇÃO 4: Acesso direto sem pedir senha novamente
+            # (A lógica de pular a senha está dentro do admin_view.py, aqui apenas redirecionamos)
+            if st.button("Acessar Dashboard"):
+                st.session_state.view = "admin"
+                st.rerun()
+            
+            st.write("---")
+            st.write("**Cadastrar Novo Aluno**")
+            new_email = st.text_input("E-mail do Aluno")
+            new_nome = st.text_input("Nome do Aluno")
+            if st.button("Cadastrar"):
+                if criar_usuario(new_email, new_nome, "mudar123"):
+                    st.success(f"Usuário {new_nome} criado! Senha padrão: mudar123")
+                else:
+                    st.error("E-mail já existe.")
+
+# --- ROTEADOR ---
+if st.session_state.view == "login":
+    login_screen()
+elif st.session_state.view == "recovery":
+    recovery_screen()
+elif st.session_state.view == "force_change":
+    force_change_screen()
+elif st.session_state.view == "admin":
+    # Validação de segurança extra
+    if st.session_state.user and st.session_state.user['tipo'] == 'admin':
+        render_admin_page()
+    else:
+        st.session_state.view = "main"
+        st.rerun()
+elif st.session_state.view == "main":
+    if st.session_state.logged_in:
+        main_app()
+    else:
+        st.session_state.view = "login"
+        st.rerun()
