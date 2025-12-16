@@ -1,24 +1,51 @@
+import os
 import streamlit as st
 import pandas as pd
 from datetime import date, datetime, timedelta
 import plotly.express as px
+import google.generativeai as genai  # <--- IMPORTANTE: Adicionado para configuração
 from langchain_google_genai import ChatGoogleGenerativeAI
 from utils import carregar_tudo_formatado, carregar_avaliacoes_formatado, SENHA_ADMIN
 
+# --- FUNÇÃO HELPER PARA PEGAR SEGREDOS ---
+def get_secret(key):
+    # 1. Tenta pegar das Variáveis de Ambiente (Render)
+    if key in os.environ:
+        return os.environ[key]
+    
+    # 2. Tenta pegar do secrets.toml (Local)
+    try:
+        if key in st.secrets:
+            return st.secrets[key]
+    except:
+        pass
+        
+    return None
+
+# --- CONFIGURAÇÃO DA IA (GLOBAL) ---
+api_key = get_secret("GOOGLE_API_KEY")
+IA_ATIVADA = False
+
+if api_key:
+    try:
+        genai.configure(api_key=api_key)
+        IA_ATIVADA = True
+    except Exception as e:
+        print(f"Erro ao configurar IA: {e}")
+
+# --- PÁGINA ADMIN ---
 def render_admin_page():
     # --- BOTÃO DE VOLTAR ---
-    # MUDANÇA AQUI: De 'page' para 'view'
     if st.button("⬅️ Voltar à Agenda"):
-        st.session_state.view = "main"  # <--- O nome correto é 'view'
+        st.session_state.view = "main"
         st.rerun()
 
     st.title("Painel Administrativo Geral")
     
-    # --- AUTO-UNLOCK (SOLICITAÇÃO 4: Acesso sem senha se já for Admin) ---
+    # --- AUTO-UNLOCK ---
     if st.session_state.user and st.session_state.user.get('tipo') == 'admin':
         st.session_state.admin_unlocked = True
     
-    # Fallback para acesso direto (Login manual no painel)
     if "admin_unlocked" not in st.session_state:
         st.session_state.admin_unlocked = False
 
@@ -32,9 +59,9 @@ def render_admin_page():
                 st.error("Acesso negado.")
         return
 
-    # --- DADOS ---
+    # --- CARREGAMENTO DE DADOS ---
     df_full = carregar_tudo_formatado()
-    df_aval = carregar_avaliacoes_formatado() # Carrega avaliações para a aba nova
+    df_aval = carregar_avaliacoes_formatado()
     
     # --- SIDEBAR DE FILTROS ---
     with st.sidebar:
@@ -69,16 +96,18 @@ def render_admin_page():
         tipos_sel = st.multiselect("Filtrar Modalidades:", todos_tipos, default=todos_tipos)
 
         st.divider()
-        if "GOOGLE_API_KEY" in st.secrets:
-            gemini_key = st.secrets["GOOGLE_API_KEY"]
+        # Status da IA (Simplificado)
+        if IA_ATIVADA:
             st.success("✨ IA Conectada (v2.5)")
         else:
-            gemini_key = st.text_input("Chave da API Google (IA)", type="password")
+            st.warning("⚠️ IA Desconectada")
+            # Opcional: Permitir inserir chave manualmente se não achou no ambiente
+            # api_key_manual = st.text_input("API Key (Opcional)", type="password")
         
-        # Botão sair do painel
+        st.divider()
         if st.button("🔒 Bloquear Painel"):
             st.session_state.admin_unlocked = False
-            st.session_state.page = "main"
+            st.session_state.view = "main" # Corrigido para 'view'
             st.rerun()
 
     # --- PROCESSAMENTO DOS FILTROS ---
@@ -104,12 +133,12 @@ def render_admin_page():
         df_filtered = pd.DataFrame(columns=df_full.columns)
 
     # =========================================================
-    # ORGANIZAÇÃO EM ABAS (NOVO RECURSO)
+    # ORGANIZAÇÃO EM ABAS
     # =========================================================
     tab_dashboard, tab_qualidade = st.tabs(["📈 Dashboard & IA", "⭐ Qualidade & Feedback"])
 
     # ---------------------------------------------------------
-    # ABA 1: DASHBOARD GERAL (O código original preservado aqui)
+    # ABA 1: DASHBOARD GERAL
     # ---------------------------------------------------------
     with tab_dashboard:
         st.subheader(f"Visão Geral ({inicio.strftime('%d/%m')} a {fim.strftime('%d/%m')})")
@@ -237,8 +266,8 @@ def render_admin_page():
         
         if df_filtered.empty:
             st.warning("Sem dados.")
-        elif not gemini_key:
-            st.warning("⚠️ Insira a API Key.")
+        elif not IA_ATIVADA or not api_key:
+            st.warning("⚠️ IA não configurada. Verifique a variável GOOGLE_API_KEY no Render.")
         else:
             sugestoes = [
                 "Quem são os alunos com risco de evasão (não vêm há 10 dias)?",
@@ -246,10 +275,6 @@ def render_admin_page():
                 "Faça um comparativo detalhado: Manhã (6-9h) vs Noite (18-21h).",
                 "Liste os alunos que SÓ fazem esteira e nunca musculação.",
                 "Qual dia da semana tem o pior movimento? Sugira uma ação para melhorar.",
-                "Identifique padrões: Existe algum horário que sempre lota na segunda-feira?",
-                "Quais são os 5 alunos mais fiéis (assíduos) do último mês?",
-                "O uso do Elíptico está baixo? Vale a pena trocar por outra Esteira?",
-                "Analise a tendência: Estamos crescendo ou diminuindo em relação à semana anterior?",
                 "Crie um resumo executivo do desempenho da academia nesta semana."
             ]
             
@@ -261,15 +286,16 @@ def render_admin_page():
             if texto_final:
                 with st.spinner(f"Analisando: '{texto_final}'..."):
                     try:
-                        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=gemini_key, temperature=0.3)
+                        # USA A VARIÁVEL GLOBAL api_key
+                        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=api_key, temperature=0.3)
                         cols_to_send = ['Data', 'Horario', 'Tipo', 'Nome']
                         csv_data = df_filtered[cols_to_send].to_csv(index=False)
                         
                         full_prompt = f"""
-                        Atue como um consultor de negócios de academia (que não é franquia e é mais voltada para ginástica). Analise os dados (CSV):
+                        Atue como um consultor de negócios de academia. Analise os dados (CSV):
                         {csv_data}
                         PERGUNTA: {texto_final}
-                        Diretrizes: 1. Use dados concretos (cite números). 2. Seja propositivo. 3. PT-BR.
+                        Diretrizes: 1. Use dados concretos. 2. Seja propositivo. 3. Responda em Português.
                         """
                         response = llm.invoke(full_prompt)
                         with st.chat_message("assistant", avatar="🤖"):
@@ -278,13 +304,13 @@ def render_admin_page():
                         st.error(f"Erro IA: {e}")
 
     # ---------------------------------------------------------
-    # ABA 2: QUALIDADE & FEEDBACK (NOVO DASHBOARD DE AVALIAÇÕES)
+    # ABA 2: QUALIDADE & FEEDBACK
     # ---------------------------------------------------------
     with tab_qualidade:
         st.subheader("⭐ Satisfação e Feedback dos Alunos")
         
         if not df_aval.empty:
-            # Métricas de Qualidade (NPS Simulado)
+            # Métricas
             media_nota = df_aval['Nota'].mean()
             total_reviews = len(df_aval)
             promotores = len(df_aval[df_aval['Nota'] == 5])
@@ -302,7 +328,6 @@ def render_admin_page():
                 st.markdown("##### Distribuição das Notas")
                 count_notas = df_aval['Nota'].value_counts().reset_index()
                 count_notas.columns = ['Nota', 'Qtd']
-                # Ordena notas de 5 a 1
                 count_notas = count_notas.sort_values('Nota', ascending=False)
                 fig_notas = px.bar(count_notas, x='Nota', y='Qtd', color='Nota', color_discrete_sequence=px.colors.qualitative.Prism)
                 fig_notas.update_layout(xaxis=dict(tickmode='linear', tick0=1, dtick=1))
@@ -311,37 +336,37 @@ def render_admin_page():
             with c_com:
                 st.markdown("##### Notas e Comentários")
                 
-                # --- NOVO: FILTRO DE ALUNO ---
-                # 1. Cria lista de alunos que já avaliaram (para aparecer no seletor)
+                # Filtro de Aluno (Multiselect)
                 lista_alunos_aval = sorted(df_aval['NomeAluno'].unique().tolist())
-                
-                # 2. Widget de seleção (permite buscar digitando)
                 filtro_aluno = st.multiselect(
                     "Filtrar por Aluno:",
                     options=lista_alunos_aval,
                     placeholder="Todos (digite para buscar...)"
                 )
                 
-                # 3. Lógica de Filtragem
-                # Primeiro: Filtra apenas quem deixou comentário de texto (ignora vazios)
-                df_coments = df_aval[df_aval['Comentario'] != ""]
+                # Filtragem base
+                df_coments = df_aval[df_aval['Comentario'] != ""].copy()
                 
-                # Segundo: Se o admin selecionou alguém no filtro, aplica o filtro de nome
                 if filtro_aluno:
                     df_coments = df_coments[df_coments['NomeAluno'].isin(filtro_aluno)]
                 
-                # Ordena (Mais recente primeiro)
-                df_coments = df_coments.sort_values('DataAvaliacao', ascending=False)
+                # --- CORREÇÃO DA ORDEM DA DATA ---
+                # 1. Cria uma coluna de DATA REAL (datetime object) baseada no texto DD/MM/YYYY
+                df_coments['DataAula_dt'] = pd.to_datetime(df_coments['DataAula'], dayfirst=True, errors='coerce')
                 
-                # 4. Exibição da Tabela
+                # 2. Ordena pela data real (Do mais recente para o mais antigo)
+                df_coments = df_coments.sort_values('DataAula_dt', ascending=False)
+                
                 if not df_coments.empty:
                     st.dataframe(
-                        df_coments[['DataAula', 'NomeAluno', 'Nota', 'Comentario', 'Modalidade']], 
+                        # ATENÇÃO: Passamos 'DataAula_dt' (data real) em vez de 'DataAula' (texto)
+                        df_coments[['DataAula_dt', 'NomeAluno', 'Nota', 'Comentario', 'Modalidade']], 
                         hide_index=True, 
                         use_container_width=True,
                         column_config={
+                            # Configura a coluna de data para exibir bonito (DD/MM/YYYY), mas ordenar matematicamente
+                            "DataAula_dt": st.column_config.DateColumn("Data Treino", format="DD/MM/YYYY"),
                             "Nota": st.column_config.NumberColumn("Nota", format="%d ⭐"),
-                            "DataAula": st.column_config.TextColumn("Data Treino"),
                             "NomeAluno": st.column_config.TextColumn("Aluno")
                         }
                     )
@@ -349,55 +374,38 @@ def render_admin_page():
                     if filtro_aluno:
                         st.warning("Este aluno avaliou, mas não deixou comentários de texto.")
                     else:
-                        st.info("Nenhum comentário de texto registrado no sistema.")
+                        st.info("Nenhum comentário de texto registrado.")
         else:
-            st.info("Ainda não há avaliações registradas no sistema. Incentive seus alunos a avaliar os treinos!")
+            st.info("Ainda não há avaliações registradas.")
+            
         st.divider()
         st.subheader("🔍 Análise Profunda de Qualidade")
 
-        # Prepara dados de data para gráficos temporais
-        # Converte a string 'DataAvaliacao' para objeto datetime real
+        # Conversão de Data para Gráficos
         df_aval['Data_dt'] = pd.to_datetime(df_aval['DataAvaliacao'], errors='coerce')
-        df_aval['Dia'] = df_aval['Data_dt'].dt.strftime('%d/%m') # Formato visual 13/12
+        df_aval['Dia'] = df_aval['Data_dt'].dt.strftime('%d/%m')
 
         col_q1, col_q2 = st.columns(2)
 
-        # GRÁFICO 1: TENDÊNCIA TEMPORAL
         with col_q1:
-            st.markdown("##### 📈 Evolução da Nota Média (Dia a Dia)")
+            st.markdown("##### 📈 Evolução da Nota Média")
             if not df_aval.empty:
-                # Agrupa por dia e tira a média da nota
                 df_evolucao = df_aval.groupby('Dia')['Nota'].mean().reset_index()
-                
-                fig_evol = px.line(df_evolucao, x='Dia', y='Nota', markers=True, 
-                                    range_y=[0, 5.5], # Fixa o eixo Y de 0 a 5.5 para visualização real
-                                    title="A qualidade está subindo ou descendo?")
-                
-                # Adiciona uma linha de meta (Ex: nota 4.5 é a meta)
-                fig_evol.add_hline(y=4.5, line_dash="dot", line_color="green", 
-                                    annotation_text="Meta de Excelência (4.5)")
-                
+                fig_evol = px.line(df_evolucao, x='Dia', y='Nota', markers=True, range_y=[0, 5.5])
+                fig_evol.add_hline(y=4.5, line_dash="dot", line_color="green", annotation_text="Meta (4.5)")
                 st.plotly_chart(fig_evol, use_container_width=True)
             else:
-                st.info("Dados insuficientes para gerar tendência.")
+                st.info("Dados insuficientes.")
 
-        # GRÁFICO 2: RANKING POR MODALIDADE
         with col_q2:
             st.markdown("##### 🏆 Satisfação por Equipamento")
             if not df_aval.empty:
-                # Agrupa por modalidade e calcula média e quantidade
                 df_mod = df_aval.groupby('Modalidade')['Nota'].agg(['mean', 'count']).reset_index()
                 df_mod.columns = ['Modalidade', 'Nota Média', 'Qtd Avaliações']
-                
-                # Gráfico de barras colorido pela nota (Vermelho=Ruim, Verde=Bom)
-                fig_mod = px.bar(df_mod, x='Modalidade', y='Nota Média', 
-                                    color='Nota Média',
-                                    range_y=[0, 5.5],
-                                    text_auto='.1f', # Mostra o valor em cima da barra com 1 casa decimal
-                                    color_continuous_scale='RdYlGn', # Escala Red-Yellow-Green
-                                    hover_data=['Qtd Avaliações']) # Mostra quantos votaram ao passar o mouse
-                
-                fig_mod.update_layout(coloraxis_showscale=False) # Esconde a barra de cores lateral
+                fig_mod = px.bar(df_mod, x='Modalidade', y='Nota Média', color='Nota Média',
+                                    range_y=[0, 5.5], text_auto='.1f', color_continuous_scale='RdYlGn',
+                                    hover_data=['Qtd Avaliações'])
+                fig_mod.update_layout(coloraxis_showscale=False)
                 st.plotly_chart(fig_mod, use_container_width=True)
             else:
-                st.info("Sem dados de modalidade.")
+                st.info("Sem dados.")
