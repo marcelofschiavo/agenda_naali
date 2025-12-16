@@ -1,3 +1,4 @@
+import os
 import pandas as pd
 from datetime import datetime
 import hashlib
@@ -9,10 +10,49 @@ import string
 from sqlalchemy import text
 
 # ==========================================
-# CONFIGURAÇÃO DO BANCO DE DADOS (SQL)
+# 0. FUNÇÃO DE CONEXÃO ROBUSTA (UNIVERSAL)
 # ==========================================
-# O Streamlit gerencia a conexão automaticamente usando os segredos
-conn = st.connection("postgresql", type="sql")
+def get_db_connection():
+    """
+    Função inteligente que busca a credencial no Render (Variável de Ambiente)
+    ou no Local (secrets.toml), corrigindo bugs do SQLAlchemy.
+    """
+    # 1. Tenta pegar do Render (Variável de Ambiente)
+    db_url = os.environ.get("DATABASE_URL")
+
+    # 2. Se não achou (estamos Local), tenta pegar do secrets.toml
+    if not db_url:
+        try:
+            # Tenta pegar com o nome 'postgres' OU 'postgresql' para garantir
+            if "connections" in st.secrets:
+                if "postgres" in st.secrets["connections"]:
+                    db_url = st.secrets["connections"]["postgres"]["url"]
+                elif "postgresql" in st.secrets["connections"]:
+                    db_url = st.secrets["connections"]["postgresql"]["url"]
+        except:
+            # Se der erro ao ler secrets, ignoramos por enquanto
+            pass
+    
+    # 3. Correção do bug do SQLAlchemy (postgres:// -> postgresql://)
+    # O Render/Neon costuma mandar postgres://, mas o Python exige postgresql://
+    if db_url and db_url.startswith("postgres://"):
+        db_url = db_url.replace("postgres://", "postgresql://", 1)
+
+    # 4. Verifica se a URL foi encontrada antes de conectar
+    if not db_url:
+        # Se chegamos aqui sem URL, o app vai quebrar, então avisamos
+        st.error("Erro Crítico: Não foi possível encontrar a URL do Banco de Dados.")
+        st.stop()
+
+    # 5. Retorna a conexão configurada
+    return st.connection("postgres", type="sql", url=db_url)
+
+# ==========================================
+# CONFIGURAÇÃO GLOBAL
+# ==========================================
+
+# AQUI ESTAVA O ERRO: Agora usamos a função robusta para definir a conexão global
+conn = get_db_connection()
 
 # Constantes
 SENHA_ADMIN = "naalli2025" 
@@ -28,63 +68,72 @@ def hash_senha(senha):
 
 def inicializar_banco():
     """Cria as tabelas no Neon se não existirem."""
-    with conn.session as s:
-        # Tabela Usuários
-        s.execute(text("""
-            CREATE TABLE IF NOT EXISTS users (
-                email TEXT PRIMARY KEY,
-                nome TEXT,
-                senha TEXT,
-                mudar_senha BOOLEAN,
-                tipo TEXT
-            );
-        """))
-        
-        # Tabela Agendamentos
-        s.execute(text("""
-            CREATE TABLE IF NOT EXISTS agendamentos (
-                id SERIAL PRIMARY KEY,
-                data TEXT,
-                horario TEXT,
-                numero INTEGER,
-                tipo TEXT,
-                nome TEXT,
-                pin TEXT,
-                criado_em TEXT
-            );
-        """))
-        
-        # Tabela Avaliações
-        s.execute(text("""
-            CREATE TABLE IF NOT EXISTS avaliacoes (
-                id SERIAL PRIMARY KEY,
-                id_agendamento INTEGER,
-                nome_aluno TEXT,
-                data_aula TEXT,
-                modalidade TEXT,
-                nota INTEGER,
-                comentario TEXT,
-                data_avaliacao TEXT
-            );
-        """))
-        s.commit()
+    try:
+        with conn.session as s:
+            # Tabela Usuários
+            s.execute(text("""
+                CREATE TABLE IF NOT EXISTS users (
+                    email TEXT PRIMARY KEY,
+                    nome TEXT,
+                    senha TEXT,
+                    mudar_senha BOOLEAN,
+                    tipo TEXT
+                );
+            """))
+            
+            # Tabela Agendamentos
+            s.execute(text("""
+                CREATE TABLE IF NOT EXISTS agendamentos (
+                    id SERIAL PRIMARY KEY,
+                    data TEXT,
+                    horario TEXT,
+                    numero INTEGER,
+                    tipo TEXT,
+                    nome TEXT,
+                    pin TEXT,
+                    criado_em TEXT
+                );
+            """))
+            
+            # Tabela Avaliações
+            s.execute(text("""
+                CREATE TABLE IF NOT EXISTS avaliacoes (
+                    id SERIAL PRIMARY KEY,
+                    id_agendamento INTEGER,
+                    nome_aluno TEXT,
+                    data_aula TEXT,
+                    modalidade TEXT,
+                    nota INTEGER,
+                    comentario TEXT,
+                    data_avaliacao TEXT
+                );
+            """))
+            s.commit()
 
-    # Cria Admin padrão se a tabela estiver vazia
-    users = conn.query("SELECT * FROM users", ttl=0)
-    if users.empty:
-        criar_usuario(DEFAULT_ADMIN_EMAIL, "Administrador", DEFAULT_ADMIN_PASS, "admin")
+        # Cria Admin padrão se a tabela estiver vazia
+        users = conn.query("SELECT * FROM users", ttl=0)
+        if users.empty:
+            criar_usuario(DEFAULT_ADMIN_EMAIL, "Administrador", DEFAULT_ADMIN_PASS, "admin")
+            
+    except Exception as e:
+        st.error(f"Erro ao inicializar banco de dados: {e}")
 
 def verificar_login(email, senha_digitada):
+    # Usa a conexão global já configurada
     email = email.strip()
     senha_digitada = senha_digitada.strip()
     
-    # Busca segura com parâmetros (evita SQL Injection)
-    df = conn.query("SELECT * FROM users WHERE email = :email", params={"email": email}, ttl=0)
-    
-    if not df.empty:
-        user_data = df.iloc[0].to_dict()
-        if user_data['senha'] == hash_senha(senha_digitada):
-            return user_data
+    try:
+        # Busca segura com parâmetros (evita SQL Injection)
+        df = conn.query("SELECT * FROM users WHERE email = :email", params={"email": email}, ttl=0)
+        
+        if not df.empty:
+            user_data = df.iloc[0].to_dict()
+            if user_data['senha'] == hash_senha(senha_digitada):
+                return user_data
+    except Exception as e:
+        st.error(f"Erro no login: {e}")
+        
     return None
 
 def atualizar_senha(email, nova_senha):
@@ -114,9 +163,9 @@ def recuperar_senha_email(email_destino):
     try:
         if "email" in st.secrets:
             secrets = st.secrets["email"]
-            msg = MIMEText(f"Sua senha temporária: {nova_senha_temp}")
-            msg['Subject'] = "Recuperação Naalli"
-            msg['From'] = secrets["sender_email"]
+            msg = MIMEText(f"Olá! Para recuperar seu acesso, utilize a senha temporária: {nova_senha_temp}")
+            msg['Subject'] = "[Agenda Naalli] Recuperação de Senha"
+            msg['From'] = secrets["sender_email"]  
             msg['To'] = email_destino
 
             with smtplib.SMTP_SSL(secrets["smtp_server"], secrets["smtp_port"]) as server:
@@ -275,10 +324,24 @@ def salvar_avaliacao_aluno(id_agendamento, nome_aluno, data_aula, modalidade, no
     return True
 
 def carregar_avaliacoes_formatado():
+    # 1. Carrega os dados brutos (que vêm como texto)
     df = conn.query("SELECT modalidade AS \"Modalidade\", nota AS \"Nota\", comentario AS \"Comentario\", nome_aluno AS \"NomeAluno\", data_aula AS \"DataAula\", data_avaliacao AS \"DataAvaliacao\" FROM avaliacoes", ttl=0)
+    
     if df.empty:
         return pd.DataFrame(columns=["Modalidade", "Nota", "Comentario", "NomeAluno", "DataAula"])
-    return df
+    
+    # 2. CONVERSÃO INTELIGENTE
+    # Cria uma coluna temporária convertendo o texto DD/MM/YYYY para Data Real
+    # 'dayfirst=True' avisa o Python que o dia vem antes do mês (padrão Brasil)
+    df['ordem_cronologica'] = pd.to_datetime(df['DataAula'], dayfirst=True, errors='coerce')
+    
+    # 3. ORDENAÇÃO
+    # Ordena pela data real (Ascending=False coloca os mais recentes no topo)
+    df = df.sort_values(by='ordem_cronologica', ascending=False)
+    
+    # 4. LIMPEZA
+    # Remove a coluna temporária para não sujar a tabela visual
+    return df.drop(columns=['ordem_cronologica'])
 
-# Inicializa tabelas
+# Inicializa tabelas no final, agora seguro com a conexão configurada
 inicializar_banco()

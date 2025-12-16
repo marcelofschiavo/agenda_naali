@@ -6,11 +6,13 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from utils import carregar_tudo_formatado, carregar_avaliacoes_formatado, SENHA_ADMIN
 
 def render_admin_page():
+    # --- BOTÃO DE VOLTAR ---
+    # MUDANÇA AQUI: De 'page' para 'view'
     if st.button("⬅️ Voltar à Agenda"):
-        st.session_state.page = "main"
+        st.session_state.view = "main"  # <--- O nome correto é 'view'
         st.rerun()
 
-    st.title("📊 Gestão e Inteligência")
+    st.title("Painel Administrativo Geral")
     
     # --- AUTO-UNLOCK (SOLICITAÇÃO 4: Acesso sem senha se já for Admin) ---
     if st.session_state.user and st.session_state.user.get('tipo') == 'admin':
@@ -307,22 +309,47 @@ def render_admin_page():
                 st.plotly_chart(fig_notas, use_container_width=True)
                 
             with c_com:
-                st.markdown("##### Últimos Comentários")
-                # Filtra apenas quem deixou comentário
-                df_coments = df_aval[df_aval['Comentario'] != ""].sort_values('DataAvaliacao', ascending=False)
+                st.markdown("##### Notas e Comentários")
                 
+                # --- NOVO: FILTRO DE ALUNO ---
+                # 1. Cria lista de alunos que já avaliaram (para aparecer no seletor)
+                lista_alunos_aval = sorted(df_aval['NomeAluno'].unique().tolist())
+                
+                # 2. Widget de seleção (permite buscar digitando)
+                filtro_aluno = st.multiselect(
+                    "Filtrar por Aluno:",
+                    options=lista_alunos_aval,
+                    placeholder="Todos (digite para buscar...)"
+                )
+                
+                # 3. Lógica de Filtragem
+                # Primeiro: Filtra apenas quem deixou comentário de texto (ignora vazios)
+                df_coments = df_aval[df_aval['Comentario'] != ""]
+                
+                # Segundo: Se o admin selecionou alguém no filtro, aplica o filtro de nome
+                if filtro_aluno:
+                    df_coments = df_coments[df_coments['NomeAluno'].isin(filtro_aluno)]
+                
+                # Ordena (Mais recente primeiro)
+                df_coments = df_coments.sort_values('DataAvaliacao', ascending=False)
+                
+                # 4. Exibição da Tabela
                 if not df_coments.empty:
-                    # Tabela interativa
                     st.dataframe(
                         df_coments[['DataAula', 'NomeAluno', 'Nota', 'Comentario', 'Modalidade']], 
                         hide_index=True, 
                         use_container_width=True,
                         column_config={
-                            "Nota": st.column_config.NumberColumn("Nota", format="%d ⭐")
+                            "Nota": st.column_config.NumberColumn("Nota", format="%d ⭐"),
+                            "DataAula": st.column_config.TextColumn("Data Treino"),
+                            "NomeAluno": st.column_config.TextColumn("Aluno")
                         }
                     )
                 else:
-                    st.info("Nenhum comentário de texto registrado, apenas notas.")
+                    if filtro_aluno:
+                        st.warning("Este aluno avaliou, mas não deixou comentários de texto.")
+                    else:
+                        st.info("Nenhum comentário de texto registrado no sistema.")
         else:
             st.info("Ainda não há avaliações registradas no sistema. Incentive seus alunos a avaliar os treinos!")
         st.divider()
