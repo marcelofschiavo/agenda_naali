@@ -45,13 +45,15 @@ if "logged_in" not in st.session_state:
     st.session_state.user = None
     st.session_state.view = "login"
 
-# --- HELPER: FORMATAR NOME ---
+# --- HELPER: FORMATAR NOME (Regra: Inteiro até 3 nomes, ou corta no 3º) ---
 def formatar_nome_curto(nome_completo):
     if not nome_completo: return ""
     partes = nome_completo.strip().split()
-    if len(partes) >= 2:
-        return f"{partes[0]} {partes[1]}"
-    return partes[0]
+    
+    # A lógica mágica do Python:
+    # [:3] significa "pegue do início até o item 3".
+    # Se o nome tiver 2 partes, ele pega as 2. Se tiver 10, ele pega só as 3 primeiras.
+    return " ".join(partes[:3])
 
 # --- TELA DE LOGIN ---
 def login_screen():
